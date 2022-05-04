@@ -6,9 +6,11 @@ Created on Mon Apr 25 13:46:53 2022
 @author: thomasmernagh
 """
 
-
+#%%
 #rudimental EDA
 #Importing dataset, checking for outliers
+import os
+import glob
 import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
@@ -17,11 +19,37 @@ import geopandas
 import pysal
 import contextily
 from sklearn.cluster import DBSCAN
+from IPython.display import display
+
 
 plt.style.use('bmh')
 
+#%%
+#%%
+# use glob to get all the csv files
+# in the folder
+#path = os.getcwd()
+#csv_files = glob.glob(os.path.join(path, "*.csv"))
 
-df = pd.read_csv("provincie-utrecht_2021_04_12_2021_04_19.csv")
+
+# loop over the list of csv files
+#for f in csv_files:
+	
+	# read the csv file
+#	df = pd.read_csv(f)
+	
+	# print the location and filename
+#	print('Location:', f)
+#	print('File Name:', f.split("\\")[-1])
+	
+	# print the content
+#	print('Content:')
+#	display(df)
+#	print()
+
+#%%
+#%%
+df = pd.read_csv("Week16.csv")
 print (df)
 
 df.head()
@@ -35,6 +63,9 @@ for c in df.columns:
         print(c, end=", ")
 print('\n')
 df = df2
+
+
+#%%
 #%%
 
 #Investigating distribution of sensors over sequence
@@ -78,21 +109,22 @@ for (key, value) in all_correlations:
     
 #Removing zero values didn't make a difference! 
 #%%
+#%%
 #Feature to feature relationship
-corr = df_num.drop('trip_sequence', axis=1).corr() # We already examined SalePrice correlations
+corr = df_num.drop('trip_sequence', axis=1).corr() # 
 plt.figure(figsize=(12, 10))
 
 sns.heatmap(corr[(corr >= 0.5) | (corr <= -0.4)], 
             cmap='viridis', vmax=1.0, vmin=-1.0, linewidths=0.1,
             annot=True, annot_kws={"size": 8}, square=True);
-
+#%%
 
 #https://geographicdata.science/book/notebooks/08_point_pattern_analysis.html
 #Further spatial EDA
 
 #Dealing with weights
 from pysal.lib import weights
-utrecht = geopandas.read_file('UtrechtW15.shp')
+utrecht = geopandas.read_file('UtrechtW16.shp')
 w_queen = weights.contiguity.Queen.from_dataframe(utrecht)
 
 # Plot tract geography
@@ -120,10 +152,20 @@ w_rook = weights.contiguity.Rook.from_dataframe(utrecht)
 print(w_rook.pct_nonzero)
 s = pd.Series(w_rook.cardinalities)
 s.plot.hist(bins=s.unique().shape[0]);
+#%%
+#%%
 
+import geopandas
+import seaborn
+import pandas 
+import matplotlib.pyplot as plt
+from shapely.geometry import Polygon
+from pysal.lib import weights
+
+gdf = geopandas.GeoDataFrame(df, geometry=geopandas.points_from_xy(df.lon, df.lat))
 #Kernal weights
 #They reflect the case where similarity/spatial proximity is assumed or expected to decay with distance. 
-w_kernel = weights.distance.Kernel.from_dataframe(df)
+w_kernel = weights.distance.Kernel.from_dataframe(gdf)
 
 # Show the first five values of bandwidths
 w_kernel.bandwidth[0:5]
@@ -284,10 +326,10 @@ plt.show()
 
 #%%
 #Dispersion
-d = centrography.std_distance(df[['lon','lat']])
+d = centrography.std_distance(df2[['lon','lat']])
 
 #Another helpful visualization is the standard deviational ellipse, or standard ellipse. This is an ellipse drawn from the data that reflects its center, dispersion, and orientation
-major, minor, rotation = centrography.ellipse(df[['lon','lat']])
+major, minor, rotation = centrography.ellipse(df2[['lon','lat']])
 
 from matplotlib.patches import Ellipse
 
@@ -471,7 +513,8 @@ from sklearn.cluster import DBSCAN
 clusterer = DBSCAN()
 # Fit to our data
 clusterer.fit(df[["lon", "lat"]])
-DBSCAN()
+
+
 
 # Print the first 5 elements of `cs`
 clusterer.core_sample_indices_[:5]
@@ -536,9 +579,3 @@ contextily.add_basemap(
 ax.set_axis_off()
 # Display the figure
 plt.show()
-
-
-
-
-
-
