@@ -2,7 +2,7 @@
 
 This is a project completed by Thomas Mernagh, in collaboration with SM Labib at Utrecht University, for partial fulfillment of the award of Master of Science in Applied Data Science.
 
-View the code <a href="https://github.com/mernagh/Thesis">here</a> and the data <a href="http://www.something.com">here</a>
+View the code <a href="https://github.com/mernagh/Thesis">here</a>. The data is, under agreement with Utrecht Province, NDA. 
 
 ### Acknowledgements
 
