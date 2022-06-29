@@ -1,0 +1,186 @@
+---
+title: "network"
+author: "Thomas Mernagh"
+date: "5/11/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r packages}
+# We'll use remotes to install packages, install it if needs be:
+if(!"remotes" %in% installed.packages()) {
+  install.packages("remotes")
+}
+
+cran_pkgs = c(
+  "sf",
+  "tidygraph",
+  "igraph",
+  "osmdata",
+  "dplyr",
+  "tibble",
+  "ggplot2",
+  "units",
+  "tmap",
+  "rgrass7",
+  "link2GI",
+  "nabor"
+)
+
+remotes::install_cran(cran_pkgs)
+```
+
+## Mandatory packages
+
+```{r packages2, echo=FALSE}
+library(sf)
+library(tidygraph)
+library(igraph)
+library(dplyr)
+library(tibble)
+library(ggplot2)
+library(units)
+library(tmap)
+library(osmdata)
+library(rgrass7)
+library(link2GI)
+library(nabor)
+```
+##Get data
+```{r, data}
+
+rm (list = ls())
+
+library(osmdata)
+library(osmextract)
+library(sf)
+library(rgdal)
+library(ggmap)
+
+#setwd("C:/Users/S M Labib/Desktop/GSV_GLASST")
+dsn <- "~/Desktop/ThesisData/Network"
+
+#Read the city street data
+cyclewaysup = oe_get(
+  "Utrecht", #change the city name to see different results (e.g., Utrecht,London)
+  quiet = FALSE,
+  query = "SELECT * FROM 'lines' WHERE highway = 'cycleway'"
+)
+par(mar = rep(0.1, 4))
+plot(sf::st_geometry(cyclewaysup))
+
+st_write(cyclewaysup, dsn, "Cycle.shp", driver = "ESRI Shapefile", overwrite = TRUE)
+```
+
+```{r}
+
+library(sfnetworks)
+library(sf)
+
+nc <- st_read("roads.geojson", package="sf")
+class(nc)
+attr(nc, "sf_column")
+print(nc[9:15], n = 3)
+
+osm_sf <- st_as_sf(osm)
+
+osm_sfnetwork <- as_sfnetwork(osm_sf, directed = FALSE, length_as_weight = TRUE)
+#add pseudo nodes for missing intersections
+osm_pseudo <- convert(osm_sfnetwork, to_spatial_subdivision)
+
+#################
+# PART 1.1: find biggest connected component
+#################
+#find the biggest connected component-- after https://github.com/ropensci/stplanr/issues/344
+osm_pseudo_sf <- osm_pseudo %>% activate("edges") %>% st_as_sf()
+touching_list <- st_touches(osm_pseudo_sf)
+graph_list <- graph.adjlist(touching_list)
+roads_group <- components(graph_list)
+roads_table <- table(roads_group$membership)
+roads_table_order <- roads_table[order(roads_table, decreasing = TRUE)]
+biggest_group <- names(roads_table_order[1])  #enumeration starts from 1 to n number of unconnected subgraphs; largest to smallest
+
+#keep ONLY connected component
+osm_connected_edges <- osm_pseudo_sf[roads_group$membership == biggest_group, ]
+osm_connected_nodes <- osm_pseudo %>% activate("nodes") %>% st_filter(osm_connected_edges, .pred = st_intersects) %>% st_as_sf()
+```
+
+```{r}
+# Load libraries
+library('osmar')
+library('geosphere')
+
+# Define the spatial extend of the OSM data we want to retrieve
+utrecht.box <- center_bbox(center_lon = 12.5450, center_lat = 41.8992, width =  2000, height = 2000)
+
+# Download all osm data inside this area
+api <- osmsource_api()
+utrecht <- get_osm(utrecht.box, source = api)
+
+# General plot
+plot(utrecht)
+
+# Find highways
+ways <- find(utrecht, way(tags(k == "highway")))
+ways <- find_down(utrecht, way(ways))
+ways <- subset(utrecht, ids = ways)
+
+# SpatialLinesDataFrame object
+hw_lines <- as_sp(ways, "lines")  
+
+# Plot
+spplot(hw_lines, zcol = "uid")
+
+# Interactive view
+mapview::mapview(hw_lines) 
+
+# Make a random points dataset (like GPS)
+gpsPoints <- spsample(x = hw_lines, n = 100, type = "random")
+
+# Plot points
+plot(hw_lines, xlab = "Lon", ylab = "Lat")
+plot(gpsPoints, add = TRUE, pch = 19, col = "red")
+box()
+
+# Distances between Higways and random points
+distances <- dist2Line(p = gpsPoints, line = hw_lines)
+
+```
+
+```{r}
+
+cycleways_city = oe_get(
+  "Utrecht",
+  quiet = FALSE,
+  query = "SELECT * FROM 'multipolygons' WHERE building in ('yes', 'house')"
+)
+par(mar = rep(0.1, 4))
+plot(sf::st_geometry(cycleways_city))
+
+st_write(cycleways_city, dsn, "CityDataOSM2.shp", driver = "ESRI Shapefile", overwrite = TRUE)
+
+#query = "SELECT * FROM 'multipolygons' WHERE building in ('yes', 'house')" [selected buildings]
+#query = "SELECT * FROM 'multipolygons' WHERE building  IS NOT NULL" [all buildings that has any value]
+
+```
+
+```{r}
+
+POIs = oe_get(
+  "Utrecht",
+  quiet = FALSE,
+  query = "SELECT * FROM 'points' WHERE other_tags IS NOT NULL"
+)
+par(mar = rep(0.1, 4))
+plot(sf::st_geometry(POIs))
+
+st_write(POIs, dsn, "POIs.shp", driver = "ESRI Shapefile", overwrite = TRUE)
+```
+
+
+```
+
