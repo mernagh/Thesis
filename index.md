@@ -2,6 +2,8 @@
 
 This is a project completed by Thomas Mernagh, in collaboration with SM Labib at Utrecht University, for partial fulfillment of the award of Master of Science in Applied Data Science.
 
+View the code <a href="https://github.com/mernagh/Thesis">here</a> and the data <a href="http://www.something.com">here</a>
+
 ### Acknowledgements
 
 I would like to thank my supervisor SM Labib for his continued support over the course of this research project, without our discussions and his insights, I would not have been able to reach my potential for this work. I would also like to thank my family and friends back in Ireland who offered continued support for my new chapter in life here in the Netherlands.
