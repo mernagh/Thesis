@@ -1,0 +1,831 @@
+---
+title: "R Notebook"
+output:
+  word_document: default
+  html_notebook: default
+---
+
+
+
+```{r}
+#load libraries
+
+#install.packages("easypackages")
+
+easypackages::packages ("bayesplot", "lme4", "rstan", "shinystan", "RcppEigen",
+                        "tidyverse", "tidyr", "AmesHousing", "broom", "caret", "dials", "doParallel", "e1071", "earth",
+                        "ggrepel", "glmnet", "ipred", "klaR", "kknn", "pROC", "rpart", "randomForest",
+                        "sessioninfo", "tidymodels","ranger", "recipes", "workflows", "themis","xgboost",
+                        "sf", "nngeo", "mapview","poissonreg",'gridExtra', "kernlab", "pscl", "dials", "DALEX", "DALEXtra", "vip", "tmap", 
+                        "spatialsample")
+```
+
+```{r}
+set.seed(123)
+#First we have to split the data into training and test set
+#let us create data frame dropping the geometry filed, for simple handling in the model. Keep in mind we still have the lat, lon column that stored the actual location
+
+citybound <- st_read("Utrecht_edges_final.geojson") #province bound
+citybound[is.na(citybound)] <- 0
+
+citybound$geometry <- NULL 
+#Split the data
+#we are using rsample package of tidymodel environment
+data_split <- rsample::initial_split(citybound, strata = "SeonsorID_", prop = 0.75) #where we are splitting the data at 75-25, and stratifying based on dependent variable 
+train.set_wtID <- rsample::training(data_split)
+test.set_wtID  <- rsample::testing(data_split)
+
+#declare the set explicit
+train.set <- train.set_wtID 
+test.set <- test.set_wtID 
+
+#now let us create the CV split for the training set
+#This is a general data split, it do not consider spatial cross-validation, but it considers which variable you want stratify, in this case we are doing predicting for cycling count (the NDVImean20 variable), so I selected NDVImean20 as the variable for stratification
+cv_splits <- rsample::vfold_cv(train.set, strata = "SeonsorID_", k = 10) #here K is the number of fold, k= 10 is ten fold CV
+print(cv_splits)
+```
+
+```{r, missingness}
+install.packages("devtools")
+library(devtools)
+devtools::install_github("ropensci/visdat")
+library(visdat)
+
+vis_miss(train.set.sample)
+vis_dat(train.set.sample)
+
+citybound%>%
+  is.na() %>%
+  reshape2::melt() %>%
+  ggplot(aes(Var2, Var1, fill=value)) + 
+    geom_raster() + 
+    coord_flip() +
+    scale_y_continuous(NULL, expand = c(0, 0)) +
+    scale_fill_grey(name = "", 
+                    labels = c("Present", 
+                               "Missing")) +
+    xlab("Observation") +
+    theme(axis.text.y  = element_text(size = 4))
+```
+```{r, spread}
+summary<-summary(citybound) 
+sink("summary.csv")
+summary
+sink()
+# Measures of spread for all cortisol concentrations
+sd(citybound$LSTmean, na.rm=T)                  # (Sample) Standard deviation
+IQR(citybound$LSTmean, na.rm=T)                 # Inter-quartile range
+mad(citybound$LSTmean, na.rm=T)                 # Median absolute deviation
+
+# Calculate Pearson's correlation coefficient
+cor(citybound$LSTmean, citybound$NDVImean20, use='complete.obs', method='pearson')
+
+# Calculate Spearman's rank correlation coefficient
+cor(citybound$LSTmean, citybound$NDVImean20, use='complete.obs', method='spearman')
+
+# Histogram of the number of hours per day mammals are asleep 
+# (using 20 bins along the x axis)
+ggplot(data=citybound,                        # Define the data to plot
+       aes(x=slope)) +       
+  geom_histogram(bins=20) +                # Draw the histogram with 20 bins
+  labs(x='Slope (m)',  # Set axis titles
+       y='Count') +
+  theme_bw()      
+# Set the background to white
+
+# A quantile-quantile plot for variable sleep_total in the msleep data set
+# Add a title that reminds us which variable is being plotted
+ggplot(data=citybound,                                # Define the data to plot
+       aes(sample=LSTmean)) +    
+  geom_qq() +                                      # Draw the QQ plot points
+  geom_qq_line() +                                 # Draw the QQ plot line
+  labs(title='Normal Q-Q Plot for LST_mean') +  # Add a title
+  theme_bw()       
+
+# Set the background to white
+
+# Box and whiskers plot for the Cpgmg variable in the wolf data frame
+ggplot(data=citybound,                      # Define the data to plot
+       aes(x=NULL, 
+           y=LSTmean)) + 
+  geom_boxplot() +                         # Draw a box and whiskers plot
+  labs(y='LSTmean') +             # Add y-axis title
+  theme_bw()                               # Set the background to white
+
+library(corrplot)
+library(RColorBrewer)
+M <-cor(citybound)
+corrplot(M, type="upper", order="hclust",
+         col=brewer.pal(n=8, name="RdYlBu"))
+```
+
+```{r, dimension reduction}
+###Principal Compnent Analysis
+library(dplyr)       # basic data manipulation and plotting
+library(ggplot2)     # data visualization
+library(h2o)         # performing dimension reduction
+```
+
+```{r, h2o setup}
+h2o.no_progress()  # turn off progress bars for brevity
+h2o.init(max_mem_size = "5g")  # connect to H2O instance
+```
+
+```{r, h2o}
+# convert data to h2o object
+train.numeric <- train.set[,sapply(train.set, is.numeric)]
+
+my_basket.h2o <- as.h2o(train.numeric)
+
+# run PCA
+my_pca <- h2o.prcomp(
+  training_frame = my_basket.h2o,
+  pca_method = "GramSVD",
+  k = ncol(my_basket.h2o), 
+  transform = "STANDARDIZE", 
+  impute_missing = TRUE,
+  max_runtime_secs = 1000
+)
+
+my_pca@model$eigenvectors %>% 
+  as.data.frame() %>% 
+  mutate(feature = row.names(.)) %>%
+  ggplot(aes(pc1, reorder(feature, pc1))) +
+  geom_point()
+
+# Compute eigenvalues
+#eigen <- my_pca@model$importance["Standard deviation", ] %>% as.vector() %>% .^2
+  
+# Sum of all eigenvalues equals number of variables
+#sum(eigen)
+
+
+# Find PCs where the sum of eigenvalues is greater than or equal to 1
+#which(eigen >= 1)
+
+# Extract and plot PVE and CVE
+data.frame(
+  PC  = my_pca@model$importance %>% seq_along(),
+  PVE = my_pca@model$importance %>% .[2,] %>% unlist(),
+  CVE = my_pca@model$importance %>% .[3,] %>% unlist()
+) %>%
+  tidyr::gather(metric, variance_explained, -PC) %>%
+  ggplot(aes(PC, variance_explained)) +
+  geom_point() +
+  facet_wrap(~ metric, ncol = 1, scales = "free")
+```
+###PCA
+```{r}
+library(dplyr)
+library(data.table)
+library(datasets)
+library(ggplot2)
+
+train.numeric <- train.set[,sapply(train.set, is.numeric)]
+
+pca <- prcomp(train.numeric, scale. = TRUE)
+
+pca_1_2 <- data.frame(pca$x[, 1:2])
+
+plot(pca$x[,1], pca$x[,2])
+
+pca_var <- pca$sdev^2
+pca_var_perc <- round(pca_var/sum(pca_var) * 100, 1)
+barplot(pca_var_perc, main = "Variation Plot", xlab = "PCs", ylab = "Percentage Variance", ylim = c(0, 100))
+
+PC1 <- pca$rotation[,1]
+PC1_scores <- abs(PC1)
+PC1_scores_ordered <- sort(PC1_scores, decreasing = TRUE)
+names(PC1_scores_ordered)
+
+train.numeric <- train.numeric[ , -which(names(train.numeric) %in% c("fid","edgeID", ".tidygraph", "to", "from"))]
+
+ggplot(train.numeric, aes(x=NDVImean20, y=NDVImean20, color = SeonsorID_)) + geom_point() 
+```
+
+```{r}
+#the following function can do spatial cross-validation by clustering using latitude and longitude information
+#cv_spatial_folds <- spatial_clustering_cv(train.set, coords = c("geometry"), v = 10)
+#print (cv_spatial_folds) 
+```
+
+```{r}
+#setting model recipe with recipe package
+#the first part of the recipe is the model equation
+#later we normalized the predictors using z-normalization, then centralized some predictors using step_center function, and finally we scaled some predictors with large value
+
+train.set.sample <- train.set[sample(nrow(train.set), 5000), ]
+
+model_rec <- recipe(SeonsorID_ ~ bikeshop_countsNUMPOINTS + edupois_reprojected_joinNUMPOINTS + shoppoints_count_NUMPOINTS + trafficpoints_count_NUMPOINTS + trafficsignals_count_NUMPOINTS + NDVImean20 + LSTmean + slope + UC_bikeshops_HubDist + UC_edu_HubDist + UC_shops_HubDist + UC_streetlights_HubDist + UC_trafficpoints_HubDist, data = train.set.sample) %>%
+  step_center(all_predictors() & all_numeric()) %>%
+  step_scale(all_predictors() & all_numeric()) %>%
+  step_zv(all_predictors())
+
+summary(model_rec)
+
+#we can check the recipe using glimpse function, where we will use the recipe, prepare it and then juice it! 
+glimpse(model_rec %>% prep() %>% juice())
+```
+
+```{r}
+#Create the model plan
+
+#for linear regression
+lm_plan <- 
+  linear_reg() %>% 
+  set_engine("lm")
+
+lm_fit <- lm_plan %>% 
+          fit(SeonsorID_ ~ bikeshop_countsNUMPOINTS + edupois_reprojected_joinNUMPOINTS + 
+                    shoppoints_count_NUMPOINTS + trafficpoints_count_NUMPOINTS + trafficsignals_count_NUMPOINTS + 
+                    NDVImean20 + LSTmean + slope + UC_bikeshops_HubDist + UC_edu_HubDist + UC_shops_HubDist +  UC_streetlights_HubDist + UC_trafficpoints_HubDist, data = train.set.sample)
+
+# View lm_fit properties
+lm_fit
+
+summary(lm_fit$fit)
+
+library(vip)
+vip(lm_fit)
+
+#for random forest
+rf_plan <- parsnip::rand_forest() %>%
+  parsnip::set_args(mtry  = tune()) %>%
+  parsnip::set_args(min_n = tune()) %>%
+  parsnip::set_args(trees = 200) %>% #setting the first search with 2000 trees
+  parsnip::set_engine("ranger", importance = "impurity") %>% 
+  parsnip::set_mode("regression")
+
+#XGBoost plan
+xgb_plan <- parsnip::boost_tree() %>%
+  parsnip::set_args(mtry  = tune()) %>%
+  parsnip::set_args(min_n = tune()) %>%
+  parsnip::set_args(trees = 200) %>% #setting the first search with 2000 trees
+  parsnip::set_engine("xgboost") %>% 
+  parsnip::set_mode("regression")
+
+#SVM plan, a polynomial svm
+svm_plan <- parsnip::svm_poly() %>%
+  parsnip::set_args(cost  = tune()) %>%
+  parsnip::set_engine("kernlab") %>%
+  parsnip::set_mode("regression")
+
+#Poisson plan, a polynomial svm
+poi_plan <-   poisson_reg() %>% 
+  set_engine("glm")
+
+#ANN Plan
+ann_plan <-  parsnip::mlp (
+  hidden_units = 5,
+  epochs = 100,
+  dropout = 0.1,
+  activation = "softmax") %>%
+  set_mode("regression") %>%
+  set_engine(engine = "nnet")
+```
+
+```{r}
+# Grid Search
+#We are using expand.grid function to use expansion option for the grids, there are other grids available such as regular grid. You can experiment with different grids to see which fits your data better! 
+
+#RF grid
+rf_grid <- expand.grid (mtry = c(1,3,6), #these values are selected by me, you can test other combination of values
+                       min_n = c(50,200,500))
+
+#XGBoost Grid
+xgb_grid <- expand.grid (mtry = c(1,3,6), #these values are selected by me, you can test other combination of values
+                       min_n = c(50,200,500))
+
+xgb_grid
+
+library(tidymodels)
+
+set.seed(123)
+vb_split <- initial_split(citybound, strata = SeonsorID_)
+vb_train <- training(vb_split)
+vb_test <- testing(vb_split)
+
+xgb_grid2 <- grid_latin_hypercube(
+  tree_depth(),
+  min_n(),
+  loss_reduction(),
+  sample_size = sample_prop(),
+  finalize(mtry(), vb_train),
+  learn_rate(),
+  size = 30
+)
+
+xgb_grid2
+
+xgb_spec <- boost_tree(
+  trees = 250, 
+  tree_depth = tune(), min_n = tune(), 
+  loss_reduction = tune(),                     ## first three: model complexity
+  sample_size = tune(), mtry = tune(),         ## randomness
+  learn_rate = tune(),                         ## step size
+) %>% 
+  set_engine("xgboost") %>% 
+  set_mode("classification")
+
+xgb_spec
+
+xgb_grid <- grid_latin_hypercube(
+  tree_depth(),
+  min_n(),
+  loss_reduction(),
+  sample_size = sample_prop(),
+  finalize(mtry(), vb_train),
+  learn_rate(),
+  size = 30
+)
+
+xgb_grid
+
+
+
+#SVM Grid
+#svm_grid <- expand.grid (cost = c(0.25, 0.5, 0.75, 1, 1.25, 1.5))
+
+
+#ann_grid <- expand.grid (hidden_units = c(5, 10, 20, 30, 50, 100))
+```
+
+###Tunes equations
+```{r}
+# fit model to workflow and calculate metrics
+# Here the metrics are RMSE and MAE
+#Here the workflow functions now connecting the model recipe with model plan
+
+#for linear regression
+lm_wf <-
+  workflows::workflow() %>% 
+  add_recipe(model_rec) %>% 
+  add_model(lm_plan)
+
+#for RF
+rf_wf <-
+  workflow() %>% 
+  add_recipe(model_rec) %>% 
+  add_model(rf_plan)
+
+#For XGBoost
+xgb_wf <-
+  workflow() %>% 
+  add_recipe(model_rec) %>% 
+  add_model(xgb_plan)
+
+xgb_wf
+
+#For SVM
+#svm_wf <-
+ # workflow() %>%
+  #add_recipe(model_rec) %>%
+  #add_model(svm_plan)
+
+#For Poisson
+poi_wf <-
+  workflows::workflow() %>% 
+  add_recipe(model_rec) %>% 
+  add_model(poi_plan)
+
+
+#For ANN
+#ann_wf <- 
+ # workflow() %>% 
+  #add_recipe(model_rec) %>% 
+  #add_model(ann_plan)
+#control <- tune::control_resamples(save_pred = TRUE, verbose = TRUE)
+
+```
+
+```{r}
+#now tune the linear regression
+lm_tuned <- lm_wf %>%
+fit_resamples(.,
+resamples = cv_splits,#cv_splits, here we are using spatial CV split, but you can also use the normal CV split
+control = control,
+metrics = metric_set(rmse, rsq)) #here we are saving RMSE
+
+summary(lm_tuned)
+```
+
+```{r}
+library(tidymodels)
+library(readr)
+set.seed(234)
+val_set <- validation_split(citybound, 
+                            strata = SeonsorID_, 
+                            prop = 0.80)
+val_set
+
+lm_reg_grid <- tibble(penalty = 10^seq(-4, -1, length.out = 30))
+
+lm_reg_grid %>% top_n(-5) # lowest penalty values
+
+lm_res <- 
+  lm_wf %>% 
+  tune_grid(val_set,
+            grid = lm_reg_grid,
+            control = control_grid(save_pred = TRUE),
+            metrics = metric_set(roc_auc))
+
+top_models <-
+  lm_res %>% 
+  show_best("roc_auc", n = 15) %>% 
+  arrange(penalty) 
+top_models
+
+lm_best <- 
+  lr_res %>% 
+  collect_metrics() %>% 
+  arrange(penalty) %>% 
+  slice(12)
+lm_best
+
+lm_auc <- 
+  lm_res %>% 
+  collect_predictions(parameters = lm_best) %>% 
+  roc_curve(children, .pred_children) %>% 
+  mutate(model = "ML Regression")
+
+autoplot(lm_auc)
+```
+
+```{r}
+lm_plot <- 
+  lm_res %>% 
+  collect_metrics() %>% 
+  ggplot(aes(x = penalty, y = mean)) + 
+  geom_point() + 
+  geom_line() + 
+  ylab("Area under the ROC Curve") +
+  scale_x_log10(labels = scales::label_number())
+
+lm_plot 
+```
+
+```{r}
+#now tune the rf
+#doParallel::registerDoParallel()
+rf_tuned <- rf_wf %>%
+tune_grid(.,
+               resamples = cv_splits,
+               grid = rf_grid,
+               control=control,
+               metrics = metric_set(rmse, rsq))
+```
+
+```{r}
+#now tune the xgb
+#doParallel::registerDoParallel()
+set.seed(123)
+vb_folds <- vfold_cv(vb_train, strata = SeonsorID_)
+
+vb_folds
+
+xgb_tuned <- xgb_wf %>%
+tune::tune_grid(.,
+               resamples = cv_splits,
+               grid = rf_grid,
+               control=control,
+               metrics = metric_set(rmse, rsq))
+
+collect_metrics(xgb_tuned)
+
+xgb_grid <- grid_latin_hypercube(
+  tree_depth(),
+  min_n(),
+  loss_reduction(),
+  sample_size = sample_prop(),
+  finalize(mtry(), vb_train),
+  learn_rate(),
+  size = 30
+)
+
+xgb_grid
+
+xgb_spec <- boost_tree(
+  trees = 1000, 
+  tree_depth = tune(), min_n = tune(), 
+  loss_reduction = tune(),                     ## first three: model complexity
+  sample_size = tune(), mtry = tune(),         ## randomness
+  learn_rate = tune(),                         ## step size
+) %>% 
+  set_engine("xgboost") %>% 
+  set_mode("classification")
+
+xgb_spec
+
+doParallel::registerDoParallel()
+
+set.seed(234)
+xgb_res <- tune_grid(
+  xgb_wf,
+  resamples = vb_folds,
+  grid = xgb_grid,
+  control = control_grid(save_pred = TRUE)
+)
+
+xgb_res
+
+xgb_tuned %>%
+  collect_metrics() %>%
+  filter(.metric == "roc_auc") %>%
+  select(mean, mtry:sample_size) %>%
+  pivot_longer(mtry:sample_size,
+               values_to = "value",
+               names_to = "parameter"
+  ) %>%
+  ggplot(aes(value, mean, color = parameter)) +
+  geom_point(alpha = 0.8, show.legend = FALSE) +
+  facet_wrap(~parameter, scales = "free_x") +
+  labs(x = NULL, y = "AUC")
+```
+
+```{r}
+#now tune the svm
+#doParallel::registerDoParallel()
+#svm_tuned <- svm_wf %>%
+ #     tune_grid(.,
+  #             resamples = cv_splits,
+   #            grid = svm_grid,
+    #           control=control,
+     #          metrics = metric_set(rmse, rsq))
+```
+
+```{r}
+#now tune the ann
+#doParallel::registerDoParallel()
+#ann_tuned <- ann_wf %>%
+#tune_grid(.,
+#resamples = cv_splits,#cv_splits, here we are using spatial CV split, but you can also use the normal CV split
+#control = control,
+#metrics = metric_set(rmse, rsq)) #here we are saving RMSE
+```
+
+```{r}
+poi_tuned <- poi_wf %>%
+fit_resamples(.,
+resamples = cv_splits,#cv_splits, here we are using spatial CV split, but you can also use the normal CV split
+control = control,
+metrics = metric_set(rmse, rsq)) #here we are saving RMSE
+```
+
+```{r}
+#extract the best parameters based on rmse
+lm_best_params <- select_best(lm_tuned, metric = "rmse")
+```
+
+```{r}
+rf_best_params <- select_best(rf_tuned, metric = "rmse")
+```
+
+```{r}
+xgb_best_params <- select_best(xgb_tuned, metric = "rmse")
+```
+
+```{r}
+#svm_best_params <- select_best(svm_tuned, metric = "rmse")
+```
+
+```{r}
+poi_best_params <- select_best(poi_tuned, metric = "rmse")
+```
+
+```{r}
+# ann_best_params <- select_best(ann_tuned, metric = "rmse")
+```
+
+```{r}
+# Pull best hyperparam preds from 10-fold cross validated predictions
+lm_best_OOF_preds <- collect_predictions(lm_tuned) 
+
+#for rf collect the best combinations
+rf_best_OOF_preds <- collect_predictions(rf_tuned) %>% 
+  filter(mtry  == rf_best_params$mtry[1] & min_n == rf_best_params$min_n[1])
+
+#Same for XGBoost
+xgb_best_OOF_preds <- collect_predictions(xgb_tuned) %>%
+  filter(mtry  == xgb_best_params$mtry[1] & min_n == xgb_best_params$min_n[1])
+
+#For svm
+#svm_best_OOF_preds <- collect_predictions(svm_tuned) %>%
+#   filter(cost  == svm_best_params$cost[1])
+
+poi_best_OOF_preds <- collect_predictions(poi_tuned) 
+
+#For ANN
+#ANN_best_OOF_preds <- collect_predictions(ANN_tuned)
+
+
+#Now lest us get the best parameter models
+lm_best_OOF_preds <- lm_best_OOF_preds %>% dplyr::select(-id,-.config)
+
+#rf_best_OOF_preds <- rf_best_OOF_preds %>% dplyr::select(-id,-.config)
+
+xgb_best_OOF_preds <- xgb_best_OOF_preds %>% dplyr::select(-id,-.config)
+
+#svm_best_OOF_preds <- svm_best_OOF_preds %>% dplyr::select(-id,-.config)
+
+poi_best_OOF_preds <- poi_best_OOF_preds %>% dplyr::select(-id,-.config)
+
+#ANN_best_OOF_preds <- ANN_best_OOF_preds %>% dplyr::select(-id,-.config)
+```
+
+```{r}
+#Make the prediction
+OOF_preds <- rbind(data.frame(lm_best_OOF_preds %>% dplyr::select(.pred,SeonsorID_),model = "Model-1_Linear Regression"),
+                   data.frame(rf_best_OOF_preds %>% dplyr::select(.pred,SeonsorID_),model = "Model-2_Random Forest"), 
+                   data.frame(xgb_best_OOF_preds %>% dplyr::select(.pred,SeonsorID_),model = "Model-3_XGBDT"),
+                   #data.frame(svm_best_OOF_preds %>% dplyr::select(.pred,SeonsorID_), model = "Model-4_SVM"),
+                   data.frame(poi_best_OOF_preds %>% dplyr::select(.pred,SeonsorID_),model = "Model-4_Poisson")) %>% 
+  group_by(model) %>% 
+  mutate(
+    RMSE = yardstick::rmse_vec(SeonsorID_, .pred),
+    MAE  = yardstick::mae_vec(SeonsorID_, .pred),
+    MAPE = yardstick::mape_vec((SeonsorID_+1), (.pred+1))) %>% 
+  ungroup()
+
+# average error for each model
+```
+
+```{r}
+#RMSE
+ggplot(data = OOF_preds %>%
+         dplyr::select(model, RMSE) %>%
+         distinct() ,
+       aes(x = model, y = RMSE, group = 1)) +
+  geom_path(color = "green") +
+  geom_label(aes(label = round(RMSE,3))) +
+  theme_bw()
+```
+
+```{r}
+# MAE
+ggplot(data = OOF_preds %>%
+         dplyr::select(model, MAE) %>%
+         distinct() ,
+       aes(x = model, y = MAE, group = 1)) +
+  geom_path(color = "red") +
+  geom_label(aes(label = round(MAE,3))) +
+  theme_bw()
+```
+
+```{r, mape}
+# MAPE
+ggplot(data = OOF_preds %>%
+         dplyr::select(model, MAPE) %>%
+         distinct() ,
+       aes(x = model, y = MAPE, group = 1)) +
+  geom_path(color = "red") +
+  geom_label(aes(label = round(MAPE,3))) +
+  theme_bw()
+```
+
+
+```{r}
+
+#also plot the predicted vs observed values for each model
+
+# Scatter plots: Predicted vs Observed
+ggplot(OOF_preds, aes(y=.pred , x = SeonsorID_,group = model))+ 
+  geom_point(alpha = 0.3) +
+  coord_equal() +
+  geom_abline(linetype = "dashed",color = "blue") +
+  geom_smooth(method="lm", color = "red") +
+  facet_wrap(~model,ncol = 300)+
+  theme_bw()+
+  ylim(0, 300)+
+  xlim(0, 300)
+```
+
+```{r}
+
+##===============Predict the test set=============####
+
+#Final workflow
+lm_best_wf     <- finalize_workflow(lm_wf, lm_best_params)
+rf_best_wf     <- finalize_workflow(rf_wf, rf_best_params)
+xgb_best_wf     <- finalize_workflow(xgb_wf, xgb_best_params)
+#svm_best_wf     <- finalize_workflow(svm_wf, svm_best_params)
+poi_best_wf     <- finalize_workflow(poi_wf, poi_best_params)
+
+
+lm_val_fit_geo <- lm_best_wf %>% 
+  last_fit(split     = data_split,
+           control   = control,
+           metrics   = metric_set(rmse, rsq))
+
+rf_val_fit_geo <- rf_best_wf %>% 
+ last_fit(split     = data_split,
+          control   = control,
+           metrics   = metric_set(rmse, rsq))
+
+xgb_val_fit_geo <- xgb_best_wf %>% 
+  last_fit(split     = data_split,
+           control   = control,
+           metrics   = metric_set(rmse, rsq))
+
+#svm_val_fit_geo <- svm_best_wf %>% 
+ # last_fit(split     = data_split,
+  #         control   = control,
+   #        metrics   = metric_set(rmse, rsq))
+
+poi_val_fit_geo <- poi_best_wf %>% 
+  last_fit(split     = data_split,
+           control   = control,
+           metrics   = metric_set(rmse, rsq))
+```
+
+```{r}
+# collect test set predictions from last_fit model
+lm_val_pred_geo     <- collect_predictions(lm_val_fit_geo)
+rf_val_pred_geo     <- collect_predictions(rf_val_fit_geo)
+xgb_val_pred_geo     <- collect_predictions(xgb_val_fit_geo)
+#svm_val_pred_geo     <- collect_predictions(svm_val_fit_geo)
+poi_val_pred_geo     <- collect_predictions(poi_val_fit_geo)
+
+
+
+#getting the best configuration for test data
+rf_val_pred_geo <- rf_val_pred_geo %>% dplyr::select(-id,-.config) 
+
+xgb_val_pred_geo <- xgb_val_pred_geo %>% dplyr::select(-id,-.config) 
+
+#svm_val_pred_geo <- svm_val_pred_geo %>% dplyr::select(-id,-.config) 
+
+poi_val_pred_geo <- poi_val_pred_geo %>% dplyr::select(-id,-.config) 
+
+# Aggregate test set predictions (they do not overlap with training prediction set, which is OOF_preds)
+val_preds <- rbind(data.frame(dplyr::select(lm_val_pred_geo, .pred, SeonsorID_), model = "Model-1_lm_test"),
+                   data.frame(dplyr::select(rf_val_pred_geo, .pred, SeonsorID_), model = "Model-2_RF_test"),
+                   data.frame(dplyr::select(xgb_val_pred_geo, .pred, SeonsorID_), model = "Model-3_xgb_test"),
+                   #data.frame(dplyr::select(svm_val_pred_geo, .pred, NDVImean20), model = "Model-4_SVM_test"),
+                   data.frame(dplyr::select(poi_val_pred_geo, .pred, SeonsorID_), model = "Model-4_Poisson_test")
+) %>% 
+  group_by(model) %>% 
+  mutate(RMSE = yardstick::rmse_vec(SeonsorID_, .pred),
+         MAE  = yardstick::mae_vec(SeonsorID_, .pred),
+         MAPE = yardstick::mape_vec((SeonsorID_+1), (.pred+1)),
+         absE=abs(SeonsorID_-.pred)) %>% 
+  ungroup()
+
+
+#rmse plot
+ggplot(data = val_preds %>% 
+                           dplyr::select(model, RMSE) %>% 
+                           distinct() , 
+                         aes(x = model, y = RMSE, group = 1)) +
+  geom_path(color = "green") +
+  geom_label(aes(label = round(RMSE,4))) +
+  theme_bw()
+
+# MAE chart
+ggplot(data = val_preds %>%
+         dplyr::select(model, MAE) %>%
+         distinct() ,
+       aes(x = model, y = MAE,group = 1)) +
+  geom_path(color = "red") +
+  geom_label(aes(label = round(MAE,3))) +
+  theme_bw()
+```
+
+```{r}
+
+# Observed vs. Predicted on the test set
+ggplot(val_preds, aes(y=.pred , x = SeonsorID_, group = model))+ 
+  geom_point(alpha = 0.3) +
+  coord_equal() +
+  geom_abline(linetype = "dashed",color = "red") +
+  geom_smooth(method="lm", color = "blue") +
+  facet_wrap(~model,ncol = 300)+
+  theme_bw()+
+  ylim(0,300)+
+  xlim(0,300)
+```
+
+```{r}
+# Create the model fit
+strand_fit <- 
+  xgb_wf %>% 
+  fit(data = train.set)
+```
+
+```{r}
+library(tidymodels)
+library(DALEXtra)
+
+
+explainer_rf <- DALEX::explain(model = rf_fit,  
+                               data = citybound,
+                               y = citybound$SeonsorID_, 
+                               label = "Random Forest")
+pdp_rf <- model_profile(explainer = explainer_rf, variables = "SeonsorID_")
+library("ggplot2")
+plot(pdp_rf) +  ggtitle("Partial-dependence profile") 
+
+```
+
+
+
+
