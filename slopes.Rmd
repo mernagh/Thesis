@@ -1,0 +1,29 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+#Aim: Add the slope to each edge using Digital terrain data
+
+#install.packages("remotes")
+#remotes::install_github("itsleeds/slopes")
+library(remotes)
+library(slopes)
+
+#Main code
+
+dtm <- terra::rast ("DTM.tif")
+
+sf<-st_as_sf(edgefile)
+sf
+
+sf<-sf::st_cast(edgefile)
+sf
+
+sf <- sf::st_as_sf(edgefile, wkt = "geometry" )
+sf
+
+edgefile$slope = slope_raster (sf, dem = dtm)
+```
+
